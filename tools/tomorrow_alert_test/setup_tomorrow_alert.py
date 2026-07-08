@@ -334,10 +334,7 @@ def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
 
         print("Rules language rejected precipitationProbability rule; retrying with documented AST conditions.")
         conditions_payload = insight_base_payload(config)
-        conditions_payload["conditions"] = json.dumps(
-            insight_conditions(config),
-            separators=(",", ":"),
-        )
+        conditions_payload["conditions"] = insight_conditions(config)
         try:
             response = client.request("POST", "/insights", json_body=conditions_payload)
         except ApiError as conditions_error:
@@ -352,19 +349,27 @@ def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
 
 
 def create_alert(client: TomorrowClient, config: Config, insight_id: str) -> dict[str, Any]:
+    notifications = [
+        {"type": "START"},
+        {"type": "END"},
+    ]
     payload = {
         "name": config.alert_name,
         "insight": insight_id,
         "isActive": True,
-        "notifications": json.dumps(
-            [
-                {"type": "START"},
-                {"type": "END"},
-            ],
-            separators=(",", ":"),
-        ),
+        "notifications": json.dumps(notifications, separators=(",", ":")),
     }
-    response = client.request("POST", "/alerts", json_body=payload)
+    try:
+        response = client.request("POST", "/alerts", json_body=payload)
+    except ApiError as string_error:
+        body_text = json.dumps(string_error.body, ensure_ascii=False).lower()
+        if string_error.status_code != 400 or "notification" not in body_text:
+            raise
+
+        print("Alert notifications JSON string rejected; retrying as JSON array.")
+        payload["notifications"] = notifications
+        response = client.request("POST", "/alerts", json_body=payload)
+
     created = resource(response, "alert")
     if not created:
         fail("Alert create response did not include an alert object.")
