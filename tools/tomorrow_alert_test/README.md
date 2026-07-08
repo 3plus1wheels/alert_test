@@ -117,8 +117,11 @@ The script:
 - reuses exact matching names
 - stops if a different existing location or alert would exceed the Free plan shape
 - creates the custom insight with `rules: "precipitationProbability > 70"`
+- retries once with documented AST `conditions` if Tomorrow.io rejects the rules string
 - creates the alert with `START` and `END` notifications
 - links the alert to the Hanoi location
+
+If both insight formats fail, Tomorrow.io is likely allowing `precipitationProbability` in forecast responses but not as an Insights alert parameter for this account/API. In that case, this exact no-polling rain-probability alert is not accepted by Tomorrow.io, and `inspect_tomorrow_alerts.py` is the fallback proof for forecast availability.
 
 Important Tomorrow.io docs gap: the documented `POST /v4/alerts` schema does not expose a webhook URL field. If your Tomorrow.io account requires webhook destination setup in the UI, use:
 

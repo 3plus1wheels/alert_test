@@ -268,15 +268,63 @@ def create_location(client: TomorrowClient, config: Config) -> dict[str, Any]:
     return created
 
 
-def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
-    payload = {
+def insight_base_payload(config: Config) -> dict[str, Any]:
+    return {
         "name": config.insight_name,
         "description": f"POC insight for Hanoi: {config.condition}. Free-plan one-alert test.",
         "severity": "minor",
-        "rules": config.condition,
         "tags": ["codex", "hanoi-rain-alert-poc"],
     }
-    response = client.request("POST", "/insights", json_body=payload)
+
+
+def insight_conditions(config: Config) -> dict[str, Any]:
+    return {
+        "type": "OPERATOR",
+        "content": {
+            "operator": "GREATER",
+        },
+        "children": [
+            {
+                "type": "PARAMETER",
+                "content": {
+                    "parameter": "precipitationProbability",
+                },
+            },
+            {
+                "type": "CONST",
+                "content": {
+                    "const": config.alert_threshold,
+                },
+            },
+        ],
+    }
+
+
+def is_invalid_rules_error(error: ApiError) -> bool:
+    body_text = json.dumps(error.body, ensure_ascii=False).lower()
+    return error.status_code == 400 and "rules" in body_text and "not valid" in body_text
+
+
+def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
+    rules_payload = insight_base_payload(config)
+    rules_payload["rules"] = config.condition
+
+    try:
+        response = client.request("POST", "/insights", json_body=rules_payload)
+    except ApiError as rules_error:
+        if not is_invalid_rules_error(rules_error):
+            raise
+
+        print("Rules language rejected precipitationProbability rule; retrying with documented AST conditions.")
+        conditions_payload = insight_base_payload(config)
+        conditions_payload["conditions"] = insight_conditions(config)
+        try:
+            response = client.request("POST", "/insights", json_body=conditions_payload)
+        except ApiError as conditions_error:
+            print("AST conditions retry also failed.")
+            print("Likely cause: precipitationProbability is available in forecast data, but not accepted as an Insights rule parameter for this account/API.")
+            raise conditions_error from rules_error
+
     created = resource(response, "insight")
     if not created:
         fail("Insight create response did not include an insight object.")
