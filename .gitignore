@@ -1,1 +1,6 @@
 tools/tomorrow_alert_test/.env
+tools/tomorrow_alert_test/.venv/
+tools/tomorrow_alert_test/__pycache__/
+tools/tomorrow_alert_test/data/alerts.jsonl
+__pycache__/
+*.py[cod]

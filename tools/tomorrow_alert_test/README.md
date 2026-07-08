@@ -89,6 +89,43 @@ https://your-public-host.example.com/webhooks/tomorrow/rain-alert?secret=YOUR_WE
 
 The webhook accepts a correct `secret` query parameter or `X-Webhook-Secret` header. If Tomorrow.io cannot send either during POC testing, missing secret is accepted with a warning. Wrong secret is rejected.
 
+## Run As Docker Container
+
+This is the easiest way to keep the webhook receiver running in the background.
+
+```bash
+cd tools/tomorrow_alert_test
+docker compose up -d --build
+```
+
+PowerShell:
+
+```powershell
+cd C:\Users\w\Desktop\alert_test\tools\tomorrow_alert_test
+docker compose up -d --build
+```
+
+Useful commands:
+
+```bash
+docker compose logs -f
+docker compose restart
+docker compose down
+docker compose exec tomorrow-alert-test python setup_tomorrow_alert.py
+docker compose exec tomorrow-alert-test python inspect_tomorrow_alerts.py
+```
+
+The container uses `restart: unless-stopped`, so Docker will restart it after normal Docker/Desktop restarts unless you run `docker compose down`.
+
+Alert storage is a host bind mount:
+
+```txt
+Host:      C:\Users\w\Desktop\alert_test\tools\tomorrow_alert_test\data\alerts.jsonl
+Container: /app/data/alerts.jsonl
+```
+
+That keeps alerts visible on the host and persistent across container restarts and image rebuilds.
+
 ## Public HTTPS Tunnel
 
 Cloudflare Tunnel:
@@ -105,6 +142,14 @@ PUBLIC_WEBHOOK_BASE_URL=https://the-generated-tunnel-url
 
 Free alternatives: ngrok free tunnel or localtunnel. Localhost alone will not prove Tomorrow.io delivery.
 
+Keep the tunnel outside the app container for this POC:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+Quick `trycloudflare.com` tunnel URLs can change when restarted. Use a stable Cloudflare tunnel token later if you need a permanent URL.
+
 ## Create Or Reuse Tomorrow.io Resources
 
 ```bash
@@ -117,8 +162,8 @@ The script:
 - reuses exact matching names
 - stops if a different existing location or alert would exceed the Free plan shape
 - creates the custom insight with `rules: "precipitationProbability > 70"`
-- retries once with documented AST `conditions` if Tomorrow.io rejects the rules string
-- creates the alert with `START` and `END` notifications
+- retries once with documented AST `conditions` encoded as a JSON string if Tomorrow.io rejects the rules string
+- creates the alert with `START` and `END` notifications encoded as a JSON string
 - links the alert to the Hanoi location
 
 If both insight formats fail, Tomorrow.io is likely allowing `precipitationProbability` in forecast responses but not as an Insights alert parameter for this account/API. In that case, this exact no-polling rain-probability alert is not accepted by Tomorrow.io, and `inspect_tomorrow_alerts.py` is the fallback proof for forecast availability.

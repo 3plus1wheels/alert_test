@@ -15,11 +15,12 @@ WEBHOOK_PATH = "/webhooks/tomorrow/rain-alert"
 
 
 class ApiError(Exception):
-    def __init__(self, method: str, path: str, status_code: int, body: Any):
+    def __init__(self, method: str, path: str, status_code: int, body: Any, headers: dict[str, str]):
         self.method = method
         self.path = path
         self.status_code = status_code
         self.body = body
+        self.headers = headers
         super().__init__(f"{method} {path} failed with HTTP {status_code}")
 
 
@@ -82,7 +83,7 @@ class TomorrowClient:
                 body = {"text": response.text}
 
         if response.status_code >= 400:
-            raise ApiError(method, path, response.status_code, body)
+            raise ApiError(method, path, response.status_code, body, dict(response.headers))
 
         return body
 
@@ -228,8 +229,24 @@ def print_api_error(prefix: str, error: ApiError) -> None:
     print(f"HTTP status: {error.status_code}")
     print("Response:")
     print(json.dumps(error.body, indent=2, ensure_ascii=False))
+
+    rate_headers = {
+        name: value
+        for name, value in error.headers.items()
+        if "rate" in name.lower() or name.lower() in {"retry-after", "x-retry-after"}
+    }
+    if rate_headers:
+        print("Rate-limit headers:")
+        print(json.dumps(rate_headers, indent=2, ensure_ascii=False))
+
     body_text = json.dumps(error.body, ensure_ascii=False).lower()
-    if error.status_code in {400, 402, 403, 409, 429} or "limit" in body_text or "plan" in body_text:
+    if error.status_code == 429:
+        print()
+        print("Rate-limit note:")
+        print("Tomorrow.io Free API limits are low. Wait for the current rate-limit window to reset, then rerun.")
+        return
+
+    if error.status_code in {400, 402, 403, 409} or "limit" in body_text or "plan" in body_text:
         print()
         print("Free-plan note:")
         print("Tomorrow.io Free plan allows one monitored location and one weather-based alert.")
@@ -317,7 +334,10 @@ def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
 
         print("Rules language rejected precipitationProbability rule; retrying with documented AST conditions.")
         conditions_payload = insight_base_payload(config)
-        conditions_payload["conditions"] = insight_conditions(config)
+        conditions_payload["conditions"] = json.dumps(
+            insight_conditions(config),
+            separators=(",", ":"),
+        )
         try:
             response = client.request("POST", "/insights", json_body=conditions_payload)
         except ApiError as conditions_error:
@@ -336,10 +356,13 @@ def create_alert(client: TomorrowClient, config: Config, insight_id: str) -> dic
         "name": config.alert_name,
         "insight": insight_id,
         "isActive": True,
-        "notifications": [
-            {"type": "START"},
-            {"type": "END"},
-        ],
+        "notifications": json.dumps(
+            [
+                {"type": "START"},
+                {"type": "END"},
+            ],
+            separators=(",", ":"),
+        ),
     }
     response = client.request("POST", "/alerts", json_body=payload)
     created = resource(response, "alert")
