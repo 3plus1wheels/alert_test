@@ -1,0 +1,5 @@
+fastapi>=0.111,<1
+uvicorn[standard]>=0.30,<1
+python-dotenv>=1.0,<2
+requests>=2.32,<3
+tzdata>=2024.1; platform_system == "Windows"
