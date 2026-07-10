@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 API_BASE = "https://api.tomorrow.io/v4"
 WEBHOOK_PATH = "/webhooks/tomorrow/rain-alert"
+
+DEBUG_PAYLOADS = False
 
 
 class ApiError(Exception):
@@ -38,7 +41,7 @@ class Config:
 
     @property
     def condition(self) -> str:
-        return f"precipitationProbability > {format_number(self.alert_threshold)}"
+        return f"precipitationProbability >= {format_number(self.alert_threshold)}"
 
     @property
     def webhook_base_path(self) -> str:
@@ -269,8 +272,17 @@ def ensure_existing_resource_ok(
     )
 
 
-def create_location(client: TomorrowClient, config: Config) -> dict[str, Any]:
-    payload = {
+def print_payload(label: str, payload: Any) -> None:
+    if not DEBUG_PAYLOADS:
+        return
+
+    print(f"{label} payload:")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print()
+
+
+def location_payload(config: Config) -> dict[str, Any]:
+    return {
         "name": config.location_name,
         "geometry": {
             "type": "Point",
@@ -278,6 +290,11 @@ def create_location(client: TomorrowClient, config: Config) -> dict[str, Any]:
         },
         "tags": ["codex", "hanoi-rain-alert-poc"],
     }
+
+
+def create_location(client: TomorrowClient, config: Config) -> dict[str, Any]:
+    payload = location_payload(config)
+    print_payload("POST /locations", payload)
     response = client.request("POST", "/locations", json_body=payload)
     created = resource(response, "location")
     if not created:
@@ -298,7 +315,7 @@ def insight_conditions(config: Config) -> dict[str, Any]:
     return {
         "type": "OPERATOR",
         "content": {
-            "operator": "GREATER",
+            "operator": "GREATER_EQUAL",
         },
         "children": [
             {
@@ -322,25 +339,27 @@ def is_invalid_rules_error(error: ApiError) -> bool:
     return error.status_code == 400 and "rules" in body_text and "not valid" in body_text
 
 
+def is_invalid_conditions_error(error: ApiError) -> bool:
+    body_text = json.dumps(error.body, ensure_ascii=False).lower()
+    return error.status_code == 400 and "conditions" in body_text and "not valid" in body_text
+
+
 def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
-    rules_payload = insight_base_payload(config)
-    rules_payload["rules"] = config.condition
+    conditions_payload = insight_base_payload(config)
+    conditions_payload["conditions"] = insight_conditions(config)
 
     try:
-        response = client.request("POST", "/insights", json_body=rules_payload)
-    except ApiError as rules_error:
-        if not is_invalid_rules_error(rules_error):
+        print_payload("POST /insights conditions", conditions_payload)
+        response = client.request("POST", "/insights", json_body=conditions_payload)
+    except ApiError as conditions_error:
+        if not is_invalid_conditions_error(conditions_error):
             raise
 
-        print("Rules language rejected precipitationProbability rule; retrying with documented AST conditions.")
-        conditions_payload = insight_base_payload(config)
-        conditions_payload["conditions"] = insight_conditions(config)
-        try:
-            response = client.request("POST", "/insights", json_body=conditions_payload)
-        except ApiError as conditions_error:
-            print("AST conditions retry also failed.")
-            print("Likely cause: precipitationProbability is available in forecast data, but not accepted as an Insights rule parameter for this account/API.")
-            raise conditions_error from rules_error
+        print("AST conditions rejected; retrying with rules language.")
+        rules_payload = insight_base_payload(config)
+        rules_payload["rules"] = config.condition
+        print_payload("POST /insights rules", rules_payload)
+        response = client.request("POST", "/insights", json_body=rules_payload)
 
     created = resource(response, "insight")
     if not created:
@@ -348,18 +367,34 @@ def create_insight(client: TomorrowClient, config: Config) -> dict[str, Any]:
     return created
 
 
-def create_alert(client: TomorrowClient, config: Config, insight_id: str) -> dict[str, Any]:
+def alert_payload(
+    config: Config,
+    insight_reference: str,
+    notifications: str | list[dict[str, str]] | None,
+) -> dict[str, Any]:
+    payload = {
+        "name": config.alert_name,
+        "insight": insight_reference,
+        "isActive": True,
+    }
+    if notifications is not None:
+        payload["notifications"] = notifications
+    return payload
+
+
+def create_alert(
+    client: TomorrowClient,
+    config: Config,
+    insight_reference: str,
+) -> dict[str, Any]:
     notifications = [
         {"type": "START"},
         {"type": "END"},
     ]
-    payload = {
-        "name": config.alert_name,
-        "insight": insight_id,
-        "isActive": True,
-        "notifications": json.dumps(notifications, separators=(",", ":")),
-    }
+
+    payload = alert_payload(config, insight_reference, json.dumps(notifications, separators=(",", ":")))
     try:
+        print_payload("POST /alerts notifications-string", payload)
         response = client.request("POST", "/alerts", json_body=payload)
     except ApiError as string_error:
         body_text = json.dumps(string_error.body, ensure_ascii=False).lower()
@@ -367,8 +402,19 @@ def create_alert(client: TomorrowClient, config: Config, insight_id: str) -> dic
             raise
 
         print("Alert notifications JSON string rejected; retrying as JSON array.")
-        payload["notifications"] = notifications
-        response = client.request("POST", "/alerts", json_body=payload)
+        payload = alert_payload(config, insight_reference, notifications)
+        try:
+            print_payload("POST /alerts notifications-array", payload)
+            response = client.request("POST", "/alerts", json_body=payload)
+        except ApiError as array_error:
+            body_text = json.dumps(array_error.body, ensure_ascii=False).lower()
+            if array_error.status_code != 400 or "notification" not in body_text:
+                raise
+
+            print("Alert notifications array rejected; retrying with Tomorrow.io docs-minimal alert payload.")
+            payload = alert_payload(config, insight_reference, None)
+            print_payload("POST /alerts docs-minimal", payload)
+            response = client.request("POST", "/alerts", json_body=payload)
 
     created = resource(response, "alert")
     if not created:
@@ -385,12 +431,12 @@ def validate_existing_insight(insight: dict[str, Any], config: Config) -> None:
         )
 
 
-def validate_existing_alert(alert: dict[str, Any], config: Config, insight_id: str) -> None:
+def validate_existing_alert(alert: dict[str, Any], config: Config, expected_insight: str) -> None:
     existing_insight = alert.get("insight")
-    if existing_insight is not None and str(existing_insight) != insight_id:
+    if existing_insight is not None and str(existing_insight) != expected_insight:
         fail(
             f"Existing alert {config.alert_name!r} points to insight {existing_insight!r}, "
-            f"not {insight_id!r}. Delete or rename it before rerunning."
+            f"not {expected_insight!r}. Delete or rename it before rerunning."
         )
 
 
@@ -406,8 +452,10 @@ def activate_alert_if_needed(client: TomorrowClient, alert: dict[str, Any]) -> N
 
 
 def link_location(client: TomorrowClient, alert_id: str, location_id: str) -> None:
+    payload = {"locations": [location_id]}
     try:
-        client.request("POST", f"/alerts/{alert_id}/locations/link", json_body={"locations": [location_id]})
+        print_payload(f"POST /alerts/{alert_id}/locations/link", payload)
+        client.request("POST", f"/alerts/{alert_id}/locations/link", json_body=payload)
         print("Linked alert to Hanoi location.")
     except ApiError as error:
         body_text = json.dumps(error.body, ensure_ascii=False).lower()
@@ -417,8 +465,73 @@ def link_location(client: TomorrowClient, alert_id: str, location_id: str) -> No
         raise
 
 
+def print_dry_run_payloads(config: Config) -> None:
+    print_summary(config)
+    print("Dry-run payloads only. No Tomorrow.io API calls were made.")
+    print()
+
+    rules_payload = insight_base_payload(config)
+    rules_payload["rules"] = config.condition
+
+    conditions_payload = insight_base_payload(config)
+    conditions_payload["conditions"] = insight_conditions(config)
+
+    alert_notifications = [
+        {"type": "START"},
+        {"type": "END"},
+    ]
+
+    fallback_alert_payload = alert_payload(
+        config,
+        "<INSIGHT_ID_FROM_CREATE_OR_REUSE>",
+        json.dumps(alert_notifications, separators=(",", ":")),
+    )
+
+    link_payload = {"locations": ["<LOCATION_ID_FROM_CREATE_OR_REUSE>"]}
+
+    for label, payload in [
+        ("POST /locations", location_payload(config)),
+        ("POST /insights conditions", conditions_payload),
+        ("POST /insights rules fallback", rules_payload),
+        ("POST /alerts custom insight", fallback_alert_payload),
+        ("POST /alerts/{alertId}/locations/link", link_payload),
+    ]:
+        print(f"{label}:")
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create/reuse Tomorrow.io Hanoi rain alert POC resources.")
+    parser.add_argument(
+        "--dry-run-payloads",
+        action="store_true",
+        help="Print exact request bodies and exit without calling Tomorrow.io.",
+    )
+    parser.add_argument(
+        "--debug-payloads",
+        action="store_true",
+        help="Print request bodies immediately before POST calls.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    global DEBUG_PAYLOADS
+
+    args = parse_args()
     config = load_config()
+
+    DEBUG_PAYLOADS = args.debug_payloads or os.getenv("DEBUG_TOMORROW_PAYLOADS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+    if args.dry_run_payloads:
+        print_dry_run_payloads(config)
+        return
+
     print_summary(config)
 
     client = TomorrowClient(config.api_key)
@@ -453,6 +566,10 @@ def main() -> None:
             status["location"] = "created"
             print(f"Created location: {config.location_name} ({resource_id(location)})")
 
+        location_id = resource_id(location)
+        if not location_id:
+            fail("Location has no id.")
+
         insight = find_by_name(insights, config.insight_name)
         if insight:
             validate_existing_insight(insight, config)
@@ -464,11 +581,8 @@ def main() -> None:
             print(f"Created insight: {config.insight_name} ({resource_id(insight)})")
 
         insight_id = resource_id(insight)
-        location_id = resource_id(location)
         if not insight_id:
             fail("Insight has no id.")
-        if not location_id:
-            fail("Location has no id.")
 
         if alert:
             validate_existing_alert(alert, config, insight_id)

@@ -3,8 +3,8 @@
 Minimal one-shot test for a Tomorrow.io Free plan weather alert:
 
 - one location: Hanoi, Vietnam
-- one custom insight: `precipitationProbability > 70`
-- one alert linked to that location
+- one custom insight: `precipitationProbability >= 70`
+- one Tomorrow.io alert linked to that insight and location
 - one public HTTPS webhook receiver
 
 This is only a proof of concept. It does not include flood routing, dashboards, paid providers, multi-location monitoring, SMS/email/push, or production auth.
@@ -12,7 +12,8 @@ This is only a proof of concept. It does not include flood routing, dashboards, 
 ## Files
 
 - `app.py`: FastAPI webhook receiver and local simulation endpoints.
-- `setup_tomorrow_alert.py`: Creates or reuses the Tomorrow.io location, insight, alert, and location link.
+- `setup_tomorrow_alert.py`: Creates or reuses the Tomorrow.io location, probability insight, alert, and location link.
+- `retrieve_tomorrow_alerts.py`: Lists existing Tomorrow.io alerts and retrieves details by alert ID.
 - `inspect_tomorrow_alerts.py`: Checks Hanoi hourly forecast values for `precipitationProbability`.
 - `data/alerts.jsonl`: Created at runtime when webhook or simulated events arrive.
 
@@ -56,8 +57,8 @@ WEBHOOK_SECRET=dev-secret-change-me
 HANOI_LAT=21.0278
 HANOI_LON=105.8342
 ALERT_THRESHOLD=70
-ALERT_NAME=codex-hanoi-rain-probability-gt-70
-INSIGHT_NAME=codex-rain-probability-gt-70
+ALERT_NAME=codex-hanoi-rain-probability-ge-70
+INSIGHT_NAME=codex-rain-probability-ge-70
 LOCATION_NAME=codex-hanoi-test-location
 ```
 
@@ -156,23 +157,55 @@ Quick `trycloudflare.com` tunnel URLs can change when restarted. Use a stable Cl
 python setup_tomorrow_alert.py
 ```
 
+Print exact request bodies without calling Tomorrow.io:
+
+```bash
+python setup_tomorrow_alert.py --dry-run-payloads
+```
+
+Print request bodies immediately before live POST calls:
+
+```bash
+python setup_tomorrow_alert.py --debug-payloads
+```
+
 The script:
 
 - lists existing locations, insights, and alerts before creating anything
 - reuses exact matching names
 - stops if a different existing location or alert would exceed the Free plan shape
-- creates the custom insight with `rules: "precipitationProbability > 70"`
-- retries once with documented AST `conditions` if Tomorrow.io rejects the rules string
+- creates the custom insight with documented AST `conditions` for `precipitationProbability >= 70`
+- retries the custom insight with rules language if Tomorrow.io rejects the AST body
 - creates the alert with `START` and `END` notifications, retrying array form if the JSON-string form is rejected
 - links the alert to the Hanoi location
 
-If both insight formats fail, Tomorrow.io is likely allowing `precipitationProbability` in forecast responses but not as an Insights alert parameter for this account/API. In that case, this exact no-polling rain-probability alert is not accepted by Tomorrow.io, and `inspect_tomorrow_alerts.py` is the fallback proof for forecast availability.
+If Tomorrow.io rejects `precipitationProbability >= 70`, setup stops instead of substituting a different rain condition.
 
 Important Tomorrow.io docs gap: the documented `POST /v4/alerts` schema does not expose a webhook URL field. If your Tomorrow.io account requires webhook destination setup in the UI, use:
 
 ```txt
 https://your-public-host.example.com/webhooks/tomorrow/rain-alert?secret=YOUR_WEBHOOK_SECRET
 ```
+
+## Retrieve Existing Tomorrow.io Alerts
+
+```bash
+python retrieve_tomorrow_alerts.py
+```
+
+List summaries only:
+
+```bash
+python retrieve_tomorrow_alerts.py --summary
+```
+
+Retrieve one known alert ID, using the documented `GET /v4/alerts/{alertId}` endpoint:
+
+```bash
+python retrieve_tomorrow_alerts.py --alert-id YOUR_ALERT_ID --raw
+```
+
+The script reads `TOMORROW_API_KEY` from `.env`, calls `GET /v4/alerts` to discover existing alerts, then calls `GET /v4/alerts/{alertId}` for matching alerts unless `--summary` is used.
 
 ## Forecast Preflight
 
@@ -208,10 +241,10 @@ This only proves local webhook handling. Real delivery is proven only when Tomor
 
 1. FastAPI app runs locally.
 2. Public HTTPS tunnel reaches the local app.
-3. `setup_tomorrow_alert.py` creates or reuses one Hanoi location, one custom insight, and one active alert.
+3. `setup_tomorrow_alert.py` creates or reuses one Hanoi location, one custom rain insight, and one active alert.
 4. `POST /alerts/simulate` writes to `data/alerts.jsonl`.
 5. `GET /alerts/latest` returns the newest event.
-6. Real Tomorrow.io webhook event is saved when `precipitationProbability > 70`.
+6. Real Tomorrow.io webhook event is saved when the managed rain insight triggers.
 7. If no real event fires, `inspect_tomorrow_alerts.py` shows forecast values and local handling still passes.
 
 ## References
@@ -219,6 +252,7 @@ This only proves local webhook handling. Real delivery is proven only when Tomor
 - Free plan: https://www.tomorrow.io/weather-api/
 - Free API rate limits: https://support.tomorrow.io/hc/en-us/articles/20273728362644-Free-API-Plan-Rate-Limits
 - Alerts: https://docs.tomorrow.io/reference/post-alerts
+- Retrieve alert: https://docs.tomorrow.io/reference/get-alerts-id
 - Insights: https://docs.tomorrow.io/reference/post-insights
 - Locations: https://docs.tomorrow.io/reference/post-locations
 - Forecast: https://docs.tomorrow.io/reference/weather-forecast
